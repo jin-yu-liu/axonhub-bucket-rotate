@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bucket Rotate</title>
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <main>
+      <header class="head">
+        <div>
+          <h1 id="heading">载荷存储切桶</h1>
+          <p id="lead" class="muted"></p>
+        </div>
+        <button id="refresh" class="secondary" type="button"></button>
+      </header>
+
+      <p id="status" class="status" role="status"></p>
+
+      <section class="card">
+        <dl id="summary" class="summary"></dl>
+      </section>
+
+      <section class="card">
+        <h2 id="buckets-title"></h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr id="buckets-head"></tr></thead>
+            <tbody id="buckets"></tbody>
+          </table>
+        </div>
+        <p id="pending" class="muted"></p>
+      </section>
+
+      <section class="card">
+        <h2 id="log-title"></h2>
+        <ul id="log" class="log"></ul>
+      </section>
+    </main>
+    <script crossorigin="anonymous" src="../../_axonhub/bridge.js"></script>
+    <script type="module" crossorigin="anonymous" src="./app.js"></script>
+  </body>
+</html>

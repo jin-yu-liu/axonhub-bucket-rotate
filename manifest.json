@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "id": "jinyuliu.bucket-rotate",
+  "name": "载荷存储切桶",
+  "version": "0.1.0",
+  "description": "当前默认载荷存储（S3 桶）接近阈值时，自动把默认数据存储切到下一个桶；历史请求仍从原桶读取，无需迁移。附状态页，可查看各桶用量、手动测量和切换。",
+  "axonhubVersion": "^1.0.0",
+  "pluginApiVersion": 1,
+  "permissions": ["webhook"],
+  "network": [
+    { "regex": "^https://[^/]+/admin/(auth/signin|graphql)$" },
+    { "regex": "^https://[^/]+/[A-Za-z0-9._-]{0,63}$" }
+  ],
+  "events": ["request.completed"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "axonhubUrl": {
+        "type": "string",
+        "title": "AxonHub 地址",
+        "description": "本 AxonHub 的外部 https 地址，不带路径，例如 https://ai.example.com。插件用它登录管理接口并切换默认存储。"
+      },
+      "adminEmail": {
+        "type": "string",
+        "title": "专用管理员邮箱",
+        "description": "建议单独建一个账号，只授予 read_settings、write_settings、read_data_storages。"
+      },
+      "adminPassword": {
+        "type": "string",
+        "format": "secret",
+        "title": "专用管理员密码"
+      },
+      "storages": {
+        "type": "string",
+        "format": "secret",
+        "title": "轮换存储（JSON）",
+        "description": "按轮换顺序填写，至少 2 个。示例：[{\"id\":2,\"name\":\"桶1\",\"endpoint\":\"https://<account>.r2.cloudflarestorage.com\",\"region\":\"auto\",\"bucket\":\"payload-1\",\"accessKeyId\":\"...\",\"secretAccessKey\":\"...\",\"pathStyle\":true}]。id 是 AxonHub 数据存储 ID；密钥只需 ListBucket 权限。"
+      },
+      "thresholdGb": {
+        "type": "number",
+        "title": "单桶阈值（GB）",
+        "minimum": 0.01,
+        "default": 10
+      },
+      "switchRatio": {
+        "type": "number",
+        "title": "切换线（阈值比例）",
+        "description": "当前桶用量达到 阈值×此比例 时切换。",
+        "minimum": 0.1,
+        "maximum": 1,
+        "default": 0.95
+      },
+      "targetMaxRatio": {
+        "type": "number",
+        "title": "候选桶上限（阈值比例）",
+        "description": "只切到用量低于 阈值×此比例 的桶。",
+        "minimum": 0.05,
+        "maximum": 1,
+        "default": 0.8
+      },
+      "cooldownMinutes": {
+        "type": "integer",
+        "title": "两次切换最短间隔（分钟）",
+        "minimum": 1,
+        "default": 30
+      },
+      "checkIntervalMinutes": {
+        "type": "integer",
+        "title": "检查间隔（分钟）",
+        "minimum": 1,
+        "maximum": 1440,
+        "default": 10
+      },
+      "dryRun": {
+        "type": "boolean",
+        "title": "演练模式",
+        "description": "开启时只记录判断结果、不自动切换（状态页的手动切换仍会执行）。确认测量正常后再关闭。",
+        "default": true
+      },
+      "webhookTarget": {
+        "type": "string",
+        "title": "通知 WebHook 目标名",
+        "description": "已有 WebHook 目标的名称，切换和告警时发送通知。留空不通知。"
+      }
+    },
+    "required": ["axonhubUrl", "adminEmail", "adminPassword", "storages"]
+  },
+  "ui": {
+    "pages": [
+      {
+        "key": "status",
+        "entry": "ui/status/index.html",
+        "title": { "en": "Bucket rotate", "zh-CN": "载荷存储切桶" }
+      }
+    ]
+  }
+}
