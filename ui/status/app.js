@@ -18,8 +18,10 @@ const COPY = {
     lastSwitch: "上次切换",
     lastDecision: "上次判断",
     problems: "配置问题",
-    buckets: "轮换中的存储",
-    cols: ["存储", "ID", "桶", "状态", "已用", "对象数", "测量时间", ""],
+    buckets: "轮换中的存储（按顺序，自动从 AxonHub 读取）",
+    others: "未参与轮换",
+    primary: "主库",
+    cols: ["#", "存储", "ID", "桶", "状态", "已用", "对象数", "测量时间", ""],
     measure: "测量",
     switchTo: "设为默认",
     confirmSwitch: (n) => "把默认存储切换到「" + n + "」？新请求会写入该桶。",
@@ -46,8 +48,10 @@ const COPY = {
     lastSwitch: "Last switch",
     lastDecision: "Last decision",
     problems: "Config problems",
-    buckets: "Rotated storages",
-    cols: ["Storage", "ID", "Bucket", "Status", "Used", "Objects", "Measured", ""],
+    buckets: "Rotation order (read from AxonHub)",
+    others: "Not rotated",
+    primary: "primary",
+    cols: ["#", "Storage", "ID", "Bucket", "Status", "Used", "Objects", "Measured", ""],
     measure: "Measure",
     switchTo: "Make default",
     confirmSwitch: (n) => "Switch the default storage to \"" + n + "\"? New requests will be written there.",
@@ -142,10 +146,15 @@ function render(status, usage, log, command) {
       item(t.lastDecision, status.lastDecision ? status.lastDecision.reason : t.none),
     ];
     if (status.problems && status.problems.length) items.push(item(t.problems, status.problems.join("；")));
+    const inRotation = new Set(status.storages.map((s) => s.id));
+    const others = (status.discovered || []).filter((s) => !inRotation.has(s.id));
+    if (others.length) {
+      items.push(item(t.others, others.map((s) => s.name + " (ID " + s.id + ", " + (s.primary ? t.primary : s.type) + ")").join("、")));
+    }
     summary.replaceChildren(...items);
 
     tbody.replaceChildren(
-      ...status.storages.map((s) => {
+      ...status.storages.map((s, i) => {
         const u = usage[String(s.id)];
         const ratio = u && th ? u.bytes / th : 0;
         const bar = el("span", "");
@@ -168,7 +177,7 @@ function render(status, usage, log, command) {
         );
         const objects = el("td", u ? String(u.objects) : t.none);
         objects.className = "num";
-        return row([name, el("td", String(s.id)), el("td", s.bucket), el("td", s.status), used, objects, el("td", u ? time(u.at) : t.none), actions]);
+        return row([el("td", String(i + 1)), name, el("td", String(s.id)), el("td", s.bucket), el("td", s.status), used, objects, el("td", u ? time(u.at) : t.none), actions]);
       }),
     );
   }

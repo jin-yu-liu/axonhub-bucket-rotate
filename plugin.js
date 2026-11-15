@@ -6,7 +6,7 @@
 // Each tick does one bounded step (one check, or a slice of an S3 bucket scan),
 // so it always stays inside the 10 s hook timeout.
 import { login, readState, switchDefault } from "./lib/axonhub.js";
-import { evaluate, fmtGb, parseConfig, validateAgainstAxonHub } from "./lib/rotate.js";
+import { credentialsFor, describeStorages, evaluate, fmtGb, parseConfig, resolveRotation } from "./lib/rotate.js";
 import { parseListPage, s3ErrorText, signedListRequest } from "./lib/s3.js";
 
 const POLL_MS = 10000;
@@ -67,11 +67,15 @@ async function tick(ctx, now) {
   if (after !== before) ctx.kv.set("status", after);
 }
 
-async function check(ctx, cfg, status, command, now) {
-  const token = await login(ctx, cfg);
-  const st = await readState(ctx, cfg, token);
+async function check(ctx, base, status, command, now) {
+  const token = await login(ctx, base);
+  const st = await readState(ctx, base, token);
+  // The rotation list comes from AxonHub's own data storages; config only gives the order and read-only keys.
+  const rot = resolveRotation(base, st.nodes);
+  const cfg = Object.assign({}, base, { storages: rot.storages });
   status.checkedAt = now;
   status.currentId = st.currentId;
+  status.discovered = describeStorages(st.nodes);
   status.storages = cfg.storages.map((s) => {
     const n = st.nodes[s.id] || {};
     return { id: s.id, name: s.name, bucket: s.bucket, status: n.status || "missing" };
@@ -81,7 +85,7 @@ async function check(ctx, cfg, status, command, now) {
   status.switchRatio = cfg.switchRatio;
   status.targetMaxRatio = cfg.targetMaxRatio;
 
-  const problems = validateAgainstAxonHub(cfg, st.nodes);
+  const problems = rot.problems;
   status.problems = problems;
   if (problems.length) {
     status.nextCheckAt = now + cfg.checkIntervalMinutes * 60000;
@@ -148,17 +152,21 @@ async function doSwitch(ctx, cfg, token, st, to, reason, status, now) {
 
 function startScan(ctx, cfg, id, status, now) {
   const s = cfg.storages.find((x) => x.id === id);
-  writeJSON(ctx, "scan", { id, token: null, bytes: 0, objects: 0, pages: 0, startedAt: now });
+  // Only public S3 settings go to KV (the status page can read it); keys are taken from config at scan time.
+  const target = { id: s.id, name: s.name, bucket: s.bucket, endpoint: s.endpoint, region: s.region, pathStyle: s.pathStyle };
+  writeJSON(ctx, "scan", { id, s3: target, token: null, bytes: 0, objects: 0, pages: 0, startedAt: now });
   status.scanning = { id, name: s.name, pages: 0, objects: 0, startedAt: now };
 }
 
 async function continueScan(ctx, cfg, scan, status) {
-  const s = cfg.storages.find((x) => x.id === scan.id);
-  if (!s) {
+  const target = scan.s3;
+  const key = target && credentialsFor(cfg, target);
+  if (!key) {
     ctx.kv.delete("scan");
     status.scanning = null;
     return;
   }
+  const s = Object.assign({}, target, key);
   const started = Date.now();
   while (Date.now() - started < SCAN_BUDGET_MS) {
     const params = { "list-type": "2", "max-keys": "1000" };

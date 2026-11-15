@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { hex, hmac, sha256 } from "../lib/crypto.js";
 import { parseListPage, signedListRequest } from "../lib/s3.js";
-import { GB, evaluate, gidInt, measureDue, parseConfig, validateAgainstAxonHub } from "../lib/rotate.js";
+import { GB, credentialsFor, evaluate, gidInt, measureDue, parseConfig, resolveRotation } from "../lib/rotate.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -77,21 +77,40 @@ const baseConfig = {
   axonhubUrl: "https://ai.example.com/",
   adminEmail: "ops@example.com",
   adminPassword: "pw",
-  storages: JSON.stringify([
-    { id: 2, name: "桶1", bucket: "b1", accessKeyId: "a", secretAccessKey: "s" },
-    { id: 3, name: "桶2", bucket: "b2", accessKeyId: "a", secretAccessKey: "s" },
-    { id: 4, name: "桶3", bucket: "b3", accessKeyId: "a", secretAccessKey: "s" },
-  ]),
+  accessKeyId: "a",
+  secretAccessKey: "s",
   thresholdGb: 10,
 };
+
+function nodes(statuses = {}) {
+  const n = {};
+  for (const [id, bucket] of [[2, "b1"], [3, "b2"], [4, "b3"]]) {
+    n[id] = {
+      id: "gid://axonhub/DataStorage/" + id, name: "桶" + (id - 1), type: "s3", status: statuses[id] || "active", primary: false,
+      settings: { s3: { bucketName: bucket, endpoint: "https://acc.r2.cloudflarestorage.com", region: "auto", pathStyle: true } },
+    };
+  }
+  n[1] = { id: "gid://axonhub/DataStorage/1", name: "Primary", type: "database", status: "active", primary: true, settings: {} };
+  return n;
+}
+
+function cfgWith(extra = {}) {
+  const cfg = parseConfig({ ...baseConfig, ...extra });
+  const rot = resolveRotation(cfg, nodes());
+  assert.deepEqual(rot.problems, []);
+  return { ...cfg, storages: rot.storages };
+}
 
 test("parseConfig validates", () => {
   const cfg = parseConfig(baseConfig);
   assert.equal(cfg.axonhubUrl, "https://ai.example.com");
   assert.equal(cfg.dryRun, true);
-  assert.equal(cfg.storages.length, 3);
+  assert.deepEqual(cfg.order, []);
+  assert.deepEqual(parseConfig({ ...baseConfig, rotationOrder: " 桶2，3, b1 " }).order, ["桶2", "3", "b1"]);
   assert.throws(() => parseConfig({ ...baseConfig, axonhubUrl: "http://x" }));
-  assert.throws(() => parseConfig({ ...baseConfig, storages: "[]" }));
+  assert.throws(() => parseConfig({ ...baseConfig, accessKeyId: "", secretAccessKey: "" }), /只读密钥/);
+  assert.throws(() => parseConfig({ ...baseConfig, secretAccessKey: "" }));
+  assert.throws(() => parseConfig({ ...baseConfig, extraCredentials: "bad" }), /extraCredentials/);
   assert.throws(() => parseConfig({ ...baseConfig, switchRatio: 0.5, targetMaxRatio: 0.8 }));
 });
 
@@ -100,25 +119,40 @@ test("gidInt", () => {
   assert.equal(gidInt(null), 0);
 });
 
-function nodes(statuses = {}) {
-  const n = {};
-  for (const [id, bucket] of [[2, "b1"], [3, "b2"], [4, "b3"]]) {
-    n[id] = { id: "gid://axonhub/DataStorage/" + id, name: "n" + id, type: "s3", status: statuses[id] || "active", primary: false, settings: { s3: { bucketName: bucket } } };
-  }
-  return n;
-}
+test("resolveRotation discovers S3 storages and applies the order", () => {
+  let rot = resolveRotation(parseConfig(baseConfig), nodes());
+  assert.deepEqual(rot.problems, []);
+  assert.deepEqual(rot.storages.map((s) => s.id), [2, 3, 4], "empty order = all non-primary S3 by ID");
+  assert.equal(rot.storages[0].endpoint, "https://acc.r2.cloudflarestorage.com");
+  assert.equal(rot.storages[0].region, "auto");
+  assert.equal(rot.storages[0].bucket, "b1");
 
-test("validateAgainstAxonHub", () => {
-  const cfg = parseConfig(baseConfig);
-  assert.deepEqual(validateAgainstAxonHub(cfg, nodes()), []);
-  const bad = nodes();
-  bad[3].settings.s3.bucketName = "other";
-  delete bad[4];
-  assert.equal(validateAgainstAxonHub(cfg, bad).length, 2);
+  rot = resolveRotation(parseConfig({ ...baseConfig, rotationOrder: "桶3, 2, b2" }), nodes());
+  assert.deepEqual(rot.problems, []);
+  assert.deepEqual(rot.storages.map((s) => s.id), [4, 2, 3], "by name, ID and bucket");
+
+  rot = resolveRotation(parseConfig({ ...baseConfig, rotationOrder: "桶1,桶1,Primary,nope" }), nodes());
+  assert.equal(rot.problems.length, 3);
+
+  rot = resolveRotation(parseConfig({ ...baseConfig, rotationOrder: "桶1" }), nodes());
+  assert.match(rot.problems[0], /至少需要 2 个/);
+});
+
+test("credentialsFor: override by name / ID, else shared key", () => {
+  const cfg = parseConfig({ ...baseConfig, extraCredentials: "桶2=AK2:SK/2+x; 4=AK4:SK4" });
+  const rot = resolveRotation(cfg, nodes());
+  const keys = rot.storages.map((s) => credentialsFor(cfg, s).accessKeyId);
+  assert.deepEqual(keys, ["a", "AK2", "AK4"]);
+  assert.equal(credentialsFor(cfg, rot.storages[1]).secretAccessKey, "SK/2+x");
+
+  const onlyOverrides = parseConfig({ ...baseConfig, accessKeyId: "", secretAccessKey: "", extraCredentials: "桶1=A:B;桶2=C:D" });
+  const r2 = resolveRotation(onlyOverrides, nodes());
+  assert.equal(r2.problems.length, 1, "桶3 has no key");
+  assert.match(r2.problems[0], /桶3/);
 });
 
 test("evaluate", () => {
-  const cfg = parseConfig(baseConfig);
+  const cfg = cfgWith();
   const now = 10 * 3600000;
   const fresh = (gb) => ({ bytes: gb * GB, objects: 1, at: now - 1000 });
   assert.equal(evaluate(cfg, 9, nodes(), {}, 0, now).action, "alert");
@@ -143,7 +177,7 @@ test("evaluate", () => {
 });
 
 test("measureDue", () => {
-  const cfg = parseConfig(baseConfig);
+  const cfg = cfgWith();
   const now = 100 * 60000;
   assert.equal(measureDue(cfg, null, now), true);
   assert.equal(measureDue(cfg, { bytes: 1 * GB, at: now - 30 * 60000 }, now), false);

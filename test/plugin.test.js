@@ -15,10 +15,8 @@ function fakeHost({ sizes, current = 2, dryRun = false, pageSize = 1000 }) {
       axonhubUrl: "https://ai.example.com",
       adminEmail: "ops@example.com",
       adminPassword: "pw",
-      storages: JSON.stringify([
-        { id: 2, name: "桶1", endpoint: "https://s3.example.com", region: "auto", bucket: "b1", accessKeyId: "a", secretAccessKey: "s" },
-        { id: 3, name: "桶2", endpoint: "https://s3.example.com", region: "auto", bucket: "b2", accessKeyId: "a", secretAccessKey: "s" },
-      ]),
+      accessKeyId: "a",
+      secretAccessKey: "s",
       thresholdGb: 10,
       dryRun,
       webhookTarget: "feishu",
@@ -41,8 +39,12 @@ function fakeHost({ sizes, current = 2, dryRun = false, pageSize = 1000 }) {
           calls.switch.push(state.current);
           return { status: 200, headers: {}, body: JSON.stringify({ data: { updateDefaultDataStorage: true } }) };
         }
-        const node = (id, bucket) => ({ node: { id: "gid://axonhub/DataStorage/" + id, name: "n" + id, type: "s3", status: "active", primary: false, settings: { s3: { bucketName: bucket } } } });
-        return { status: 200, headers: {}, body: JSON.stringify({ data: { defaultDataStorageID: "gid://axonhub/DataStorage/" + state.current, dataStorages: { edges: [node(2, "b1"), node(3, "b2")] } } }) };
+        assert.match(body.query, /endpoint region pathStyle/);
+        const node = (id, name, bucket) => ({
+          node: { id: "gid://axonhub/DataStorage/" + id, name, type: "s3", status: "active", primary: false, settings: { s3: { bucketName: bucket, endpoint: "https://s3.example.com", region: "auto", pathStyle: true } } },
+        });
+        const primary = { node: { id: "gid://axonhub/DataStorage/1", name: "Primary", type: "database", status: "active", primary: true, settings: { s3: null } } };
+        return { status: 200, headers: {}, body: JSON.stringify({ data: { defaultDataStorageID: "gid://axonhub/DataStorage/" + state.current, dataStorages: { edges: [primary, node(2, "桶1", "b1"), node(3, "桶2", "b2")] } } }) };
       }
       const m = /^https:\/\/s3\.example\.com\/(b\d)\?(.*)$/.exec(url);
       assert.ok(m, url);
@@ -126,7 +128,7 @@ test("manual switch command from the page", withClock(async (clock) => {
 
 test("bad config is reported without fetching", withClock(async (clock) => {
   const host = fakeHost({ sizes: { b1: 0, b2: 0 } });
-  host.ctx.config = { ...host.ctx.config, storages: "not json" };
+  host.ctx.config = { ...host.ctx.config, secretAccessKey: "" };
   await tick(host, clock);
   assert.equal(host.calls.fetch, 0);
   assert.match(JSON.parse(host.kv.get("status")).lastAlert.text, /配置错误/);
@@ -147,4 +149,30 @@ test("switches when the bucket is already over 100%", withClock(async (clock) =>
   const host = fakeHost({ sizes: { b1: 12.3 * GB, b2: 0 } });
   for (let i = 0; i < 6; i++) await tick(host, clock);
   assert.deepEqual(host.calls.switch, [3]);
+}));
+
+test("keys never land in KV", withClock(async (clock) => {
+  const host = fakeHost({ sizes: { b1: 9.7 * GB, b2: 0.3 * GB } });
+  host.ctx.config = { ...host.ctx.config, accessKeyId: "AKSECRETID", secretAccessKey: "VERYSECRET" };
+  const orig = host.ctx.fetch;
+  host.ctx.fetch = async (url, init) => {
+    const auth = init.headers.Authorization || "";
+    if (auth.startsWith("AWS4")) init = { ...init, headers: { ...init.headers, Authorization: auth.replace("AKSECRETID", "a") } };
+    return orig(url, init);
+  };
+  for (let i = 0; i < 3; i++) await tick(host, clock);
+  for (const [k, v] of host.kv) {
+    assert.ok(!String(v).includes("VERYSECRET") && !String(v).includes("AKSECRETID"), k);
+  }
+  assert.ok(host.kv.has("scan") || host.kv.has("usage.2"));
+}));
+
+test("rotation order from config is respected", withClock(async (clock) => {
+  const host = fakeHost({ sizes: { b1: 0.1 * GB, b2: 9.8 * GB }, current: 3 });
+  host.ctx.config = { ...host.ctx.config, rotationOrder: "桶2, 桶1" };
+  for (let i = 0; i < 6; i++) await tick(host, clock);
+  assert.deepEqual(host.calls.switch, [2]);
+  const status = JSON.parse(host.kv.get("status"));
+  assert.deepEqual(status.storages.map((s) => s.name), ["桶2", "桶1"]);
+  assert.equal(status.discovered.length, 3);
 }));
